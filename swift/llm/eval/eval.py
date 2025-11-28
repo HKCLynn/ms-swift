@@ -31,7 +31,7 @@ import re
 logger = get_logger()
 
 
-POINT_CLICK_PROMPT = ". Output the coordinate in JSON format."
+POINT_CLICK_PROMPT = " Output the point coordinates in JSON format."
 
 
 @register_benchmark(
@@ -55,29 +55,20 @@ POINT_CLICK_PROMPT = ". Output the coordinate in JSON format."
 )
 
 class PointClickAdapter(VisionLanguageAdapter):
-    """
-    一个自定义的打点评测适配器：
-    - record_to_sample: 把原始数据记录转成 Sample
-    - extract_answer: 从模型输出中解析坐标 (x, y)
-    - match_score: 在 mask 图上检查该点是否命中（像素值==1 / 非0）
-    """
+
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
     
     def _extract_coordinates_from_json(self, text: str, coord_keys: List[str] = None) -> list:
-        """
-        从文本中提取坐标，支持嵌套JSON格式。
-        优雅地处理：[x, y] 或 [{"bbox_2d": [x, y], ...}] 等格式。
-        """
+
         if coord_keys is None:
             coord_keys = ["point_2d", "bbox_2d", "coordinates", "position"]
         
         try:
-            # 找到第一个 '[' 并使用 json.JSONDecoder 来正确解析完整的JSON
             start = text.find('[')
             if start == -1:
-                return []
+                return ""
             
             decoder = json.JSONDecoder()
             parsed, _ = decoder.raw_decode(text[start:])
@@ -93,10 +84,9 @@ class PointClickAdapter(VisionLanguageAdapter):
         except Exception:
             pass
         
-        return []
+        return ""
 
     def load_from_disk(self, **kwargs):
-        """重写此方法以支持本地 jsonl 文件加载"""
         # 如果是单个文件，用文件名作为 subset
         if os.path.isfile(self.dataset_id):
             file_name = os.path.basename(self.dataset_id)
@@ -104,51 +94,32 @@ class PointClickAdapter(VisionLanguageAdapter):
             self.subset_list = [file_without_ext]
         return super().load_from_disk(use_local_loader=True)
 
-    # ---------- 1. 数据读取：record_to_sample ----------
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
-        """
-        原始 record -> Sample
 
-        构造 vLLM 可用的多模态格式：
-        - content_list 包含 [ContentImage, ContentText]
-        - 对应 vLLM 的 messages 格式：
-          {
-            "role": "user",
-            "content": [
-              {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}},
-              {"type": "text", "text": "问题内容"}
-            ]
-          }
-        """
-        # 1. 提取 question
         messages = record.get("messages", [])
         question = ""
         for msg in messages:
             if msg.get("role") == "user":
                 question = msg.get("content", "")
+                if not question.strip().endswith('.'):
+                    question = question + '.'
                 question = question + POINT_CLICK_PROMPT
-                # INSERT_YOUR_CODE
-                # 删掉 <image>\n 这个词
                 break
 
-        # 2. 提取 image_path 并构造 content
         image_paths = record.get("images", [])
         base_dir = "/mnt/data/datasets/knowin_datasets/washing_machine_1029/processed_washing_machine_data_all"
         image_path = os.path.join(base_dir, image_paths[0]) if image_paths else None
 
-        # 使用 evalscope 的 Content 类构造多模态内容
         content_list: List[Content] = [ContentText(text=question)]
 
         if image_path:
-            # 读取图片并转换为 base64 data URI
             with open(image_path, 'rb') as f:
                 image_bytes = f.read()
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             image_data_uri = f"data:image/jpeg;base64,{base64_image}"
             content_list.append(ContentImage(image=image_data_uri))
 
-        # 3. 提取 assistant 的 content 里的坐标作为 ground truth
         gt_points = []
         for msg in messages:
             if msg.get("role") == "assistant":
@@ -156,7 +127,6 @@ class PointClickAdapter(VisionLanguageAdapter):
                 gt_points = self._extract_coordinates_from_json(content)
                 break
 
-        # target 存放 ground truth 坐标点
         target = str(gt_points)
 
         metadata = {
@@ -171,19 +141,11 @@ class PointClickAdapter(VisionLanguageAdapter):
             metadata=metadata,
         )
 
-    # ---------- 2. 从模型输出中解析坐标：extract_answer ----------
 
     def extract_answer(self, prediction: str, task_state: TaskState) -> list:
-        """
-        从模型原始输出中提取点坐标，返回坐标列表 [x, y]。
-        支持多种格式：
-        - 简单数组: [x, y]
-        - 嵌套格式: [{"bbox_2d": [x, y], ...}] 或 [{"point_2d": [x, y], ...}]
-        如果没法解析出坐标，则返回空列表，让 match_score 判为 0 分。
-        """
+
         return str(self._extract_coordinates_from_json(prediction))
 
-    # ---------- 3. 自定义打分逻辑：match_score ----------
 
     def match_score(
         self,
@@ -192,21 +154,22 @@ class PointClickAdapter(VisionLanguageAdapter):
         reference: Any,
         task_state: TaskState,
     ) -> Score:
-        """
-        打分逻辑：
-        - filtered_prediction 是 extract_answer() 的返回值，点坐标 [x, y]
-        - reference 是 Sample.target，ground truth bbox [x1, y1, x2, y2]
-        - 判断预测的点是否在reference的bbox内部
-        """
+
         score = Score(
             extracted_prediction=str(filtered_prediction),
-            prediction=original_prediction,
+            prediction=str(original_prediction),
         )
         # 默认 0 分，避免异常时崩溃
         score.value = {"acc": 0.0}
         score.main_score_name = "acc"
 
         try:
+            # 将字符串形式的列表转换为实际列表
+            if isinstance(filtered_prediction, str):
+                filtered_prediction = json.loads(filtered_prediction)
+            if isinstance(reference, str):
+                reference = json.loads(reference)
+            
             # 检查 filtered_prediction 是否有效 (点需要2个坐标)
             if not filtered_prediction or not isinstance(filtered_prediction, (list, tuple)) or len(filtered_prediction) < 2:
                 return score

@@ -1023,7 +1023,7 @@ class Template(ProcessorMixin):
         if system is None:
             system = template_meta.default_system
 
-        if tools is not None:
+        if tools is not None and len(tools) > 0:
             system = self.agent_template._format_tools(tools, system, inputs.messages[0])
         return system
 
