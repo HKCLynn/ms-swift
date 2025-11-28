@@ -713,6 +713,120 @@ class ToolUseCorrectnessReward(ORM):
 
 
 orms['external_tooluse_correct_reward'] = ToolUseCorrectnessReward
+
+
+
+import random
+import logging
+from typing import List
+from swift.plugin import ORM, orms
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='[PointReward] %(message)s',
+    handlers=[
+        logging.FileHandler("random_reward_debug.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class PointReward(ORM):
+    """
+    调试专用：返回点距离 reward
+    目的：确认 Swift 是否正确调用 reward function，并传递梯度
+    """
+    def __call__(self, completions: List[str], solution: List[str], **kwargs) -> List[float]:
+        # INSERT_YOUR_CODE
+        import re
+        rewards = []
+        point_pattern_parentheses = re.compile(r'\(([0-9.\-]+)\s*,\s*([0-9.\-]+)\)')
+        point_pattern_brackets = re.compile(r'\[([0-9.\-]+)\s*,\s*([0-9.\-]+)\]')
+
+        for completion, ans in zip(completions, solution):
+            completion_points = []
+            ans_points = []
+            # 检索 completion 里的2d点
+            completion_points += point_pattern_parentheses.findall(completion)
+            completion_points += point_pattern_brackets.findall(completion)
+            # 检索 ans 里的2d点
+            ans_points += point_pattern_parentheses.findall(ans)
+            ans_points += point_pattern_brackets.findall(ans)
+
+            if (completion_points and not ans_points) or (ans_points and not completion_points):
+                rewards.append(-5)
+                continue
+            elif not completion_points and not ans_points:
+                rewards.append(0.0)
+                continue
+            elif completion_points and ans_points:
+                try:
+                    cx, cy = map(float, completion_points[0])
+                    ax, ay = map(float, ans_points[0])
+                    import math
+                    distance = math.sqrt((cx - ax) ** 2 + (cy - ay) ** 2)
+                    reward = -distance / 1000
+                except Exception as e:
+                    logger.error(f"Error in distance calculation: {e}")
+                    reward = -5
+                rewards.append(reward)
+                continue
+
+            logger.info(f"Completion 2d points: {completion_points if completion_points else None}")
+            logger.info(f"Answer 2d points: {ans_points if ans_points else None}")
+
+        return rewards
+
+# 注册到 swift
+orms['point_reward'] = PointReward
+
+class NoNoneReward(ORM):
+    """
+    如果 completions 里没找出点 reward=-5，有点 reward=0
+    """
+    def __call__(self, completions: List[str], solution: List[str], **kwargs) -> List[float]:
+        import re
+        rewards = []
+        point_pattern_parentheses = re.compile(r'\(([0-9.\-]+)\s*,\s*([0-9.\-]+)\)')
+        point_pattern_brackets = re.compile(r'\[([0-9.\-]+)\s*,\s*([0-9.\-]+)\]')
+
+        for completion in completions:
+            if completion == None:
+                rewards.append(-5)
+                continue
+            completion_points = []
+            completion_points += point_pattern_parentheses.findall(completion)
+            completion_points += point_pattern_brackets.findall(completion)
+            if completion_points:
+                rewards.append(0.0)
+            else:
+                rewards.append(-5)
+        return rewards
+
+# 注册到 swift
+orms['nonone_reward'] = NoNoneReward
+
+
+class RandomReward(ORM):
+    """
+    调试专用：返回随机 reward
+    目的：确认 Swift 是否正确调用 reward function，并传递梯度
+    """
+    def __call__(self, completions: List[str], solution: List[str], **kwargs) -> List[float]:
+        batch_size = len(completions)
+        # 生成 [0.1, 1.0] 之间的随机 reward
+        rewards = [round(random.uniform(0.1, 1.0), 4) for _ in range(batch_size)]
+
+        logger.info(f"Random rewards generated: {rewards}")
+        logger.info(f"completions: {[(c[:50] + '...') if len(c) > 50 else c for c in completions]}")
+        logger.info(f"solution: {[(s[:50] + '...') if len(s) > 50 else s for s in solution]}")
+
+        return rewards
+
+# 注册到 swift
+orms['random_reward'] = RandomReward
+
 """
 TO CUSTOMIZE REWARD MODEL:
     Step 1: Define a Reward Class

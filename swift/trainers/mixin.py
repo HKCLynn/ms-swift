@@ -1009,29 +1009,42 @@ class SwiftMixin:
         from evalscope import TaskConfig, run_task
 
         self.model.eval()
-        # prepare task config
-        task_config_kwargs = dict(
-            model=EvalModel(
-                model_name=f'model-step{self.state.global_step}',
-                model=self.model,
-                template=self.template,
-                max_batch_size=self.args.per_device_eval_batch_size,
-            ),
-            eval_type='swift_custom',
-            datasets=self.args.eval_dataset,
-            dataset_args=self.args.eval_dataset_args,
-            limit=self.args.eval_limit,
-            work_dir=os.path.join(self.args.output_dir, 'eval'),
-            eval_batch_size=self.args.per_device_eval_batch_size,
-            generation_config=self.args.eval_generation_config or {'max_tokens': 512},
-        )
-        task_config_kwargs.update(self.args.extra_eval_args or {})
-        task_config = TaskConfig(**task_config_kwargs)
-        # start evaluation
-        eval_report = run_task(task_config)
-        # convert to dict
-        eval_dict = {f'test_{k}': v.score for k, v in eval_report.items()}
-        self.log(eval_dict)
+        # Temporarily disable padding_free for evalscope evaluation
+        # because evalscope inputs don't have 'length' field required by packing_row
+        original_padding_free = self.template.padding_free
+        self.template.padding_free = False
+
+        # Use generate_context to properly handle multimodal models:
+        # 1. Switch template mode from 'train' to 'pt'
+        # 2. Remove post_encode_hook to avoid duplicate image processing
+        with self.template.generate_context():
+            # prepare task config
+            task_config_kwargs = dict(
+                model=EvalModel(
+                    model_name=f'model-step{self.state.global_step}',
+                    model=self.model,
+                    template=self.template,
+                    max_batch_size=self.args.per_device_eval_batch_size,
+                ),
+                eval_type='swift_custom',
+                datasets=self.args.eval_dataset,
+                dataset_args=self.args.eval_dataset_args,
+                limit=self.args.eval_limit,
+                work_dir=os.path.join(self.args.output_dir, 'eval'),
+                eval_batch_size=self.args.per_device_eval_batch_size,
+                generation_config=self.args.eval_generation_config or {'max_tokens': 512},
+            )
+            task_config_kwargs.update(self.args.extra_eval_args or {})
+            task_config = TaskConfig(**task_config_kwargs)
+            # start evaluation
+            try:
+                eval_report = run_task(task_config)
+                # convert to dict
+                eval_dict = {f'test_{k}': v.score for k, v in eval_report.items()}
+                self.log(eval_dict)
+            finally:
+                # Restore original padding_free setting
+                self.template.padding_free = original_padding_free
 
         self.model.train()
         return eval_dict
